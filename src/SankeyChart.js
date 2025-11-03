@@ -8,7 +8,9 @@ const SankeyChart = ({ data: propData }) => {
   const [selectedKey, setSelectedKey] = useState(null);
   const [allKeys, setAllKeys] = useState([]);
   const [keyPaths, setKeyPaths] = useState(new Map());
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const svgRef = useRef();
+  const containerRef = useRef();
   
   // Create color scale for keys (not values)
   const keyColorScale = useRef(d3.scaleOrdinal(d3.schemeTableau10)).current;
@@ -44,6 +46,20 @@ const SankeyChart = ({ data: propData }) => {
       }
     }
   };
+  // Handle responsive resize
+  useEffect(() => {
+    const updateDimensions = () => {
+      if (containerRef.current) {
+        const { width, height } = containerRef.current.getBoundingClientRect();
+        setDimensions({ width, height });
+      }
+    };
+    
+    updateDimensions();
+    window.addEventListener('resize', updateDimensions);
+    return () => window.removeEventListener('resize', updateDimensions);
+  }, []);
+
   // Extract all unique keys from data
   useEffect(() => {
     if (!data) return;
@@ -65,43 +81,87 @@ const SankeyChart = ({ data: propData }) => {
 
   // Main rendering effect
   useEffect(() => {
-    if (!data) return;
+    if (!data || dimensions.width === 0) return;
 
-    const margin = { top: 80, right: 200, bottom: 40, left: 40 };
-    const width = 1400 - margin.left - margin.right;
-    const height = 800 - margin.top - margin.bottom;
+    // Calculate dynamic dimensions based on data size and container
+    const nodeCount = data.nodes.length;
+    const linkCount = data.links.length;
+    
+    // Group nodes by prefix to get column count
+    const prefixes = new Set();
+    data.nodes.forEach(node => {
+      const match = node.name.match(/^([A-Za-z]+)(\d+)?/);
+      const prefix = match ? match[1] : node.name.charAt(0);
+      prefixes.add(prefix);
+    });
+    const columnCount = prefixes.size;
+    
+    // Calculate max nodes in any column
+    const nodesByPrefix = new Map();
+    data.nodes.forEach(node => {
+      const match = node.name.match(/^([A-Za-z]+)(\d+)?/);
+      const prefix = match ? match[1] : node.name.charAt(0);
+      if (!nodesByPrefix.has(prefix)) {
+        nodesByPrefix.set(prefix, 0);
+      }
+      nodesByPrefix.set(prefix, nodesByPrefix.get(prefix) + 1);
+    });
+    const maxNodesInColumn = Math.max(...Array.from(nodesByPrefix.values()));
+    
+    // Responsive sizing based on container and data
+    const containerWidth = dimensions.width;
+    const containerHeight = Math.max(600, dimensions.height);
+    
+    const legendWidth = 220;
+    const margin = { 
+      top: Math.max(60, containerHeight * 0.08), 
+      right: Math.max(30, containerWidth * 0.02), 
+      bottom: Math.max(30, containerHeight * 0.05), 
+      left: Math.max(60, containerWidth * 0.04) 
+    };
+    
+    // Calculate optimal dimensions
+    const availableWidth = containerWidth - margin.left - margin.right - legendWidth;
+    const availableHeight = containerHeight - margin.top - margin.bottom;
+    
+    const widthPerColumn = Math.max(200, availableWidth / columnCount);
+    const heightPerNode = Math.max(60, availableHeight / maxNodesInColumn);
+    
+    const width = Math.min(availableWidth, columnCount * widthPerColumn);
+    const height = Math.min(availableHeight, maxNodesInColumn * heightPerNode);
 
     // Clear previous content
     d3.select(svgRef.current).selectAll("*").remove();
 
-    // Create SVG with proper structure
+    // Create SVG with proper structure (add space for legend on the right)
     const svg = d3.select(svgRef.current)
-      .attr("width", width + margin.left + margin.right)
-      .attr("height", height + margin.top + margin.bottom);
+      .attr("width", width + margin.left + margin.right + legendWidth)
+      .attr("height", height + margin.top + margin.bottom)
+      .attr("viewBox", `0 0 ${width + margin.left + margin.right + legendWidth} ${height + margin.top + margin.bottom}`)
+      .attr("preserveAspectRatio", "xMidYMid meet")
+      .style("max-width", "100%")
+      .style("height", "auto");
 
     const g = svg.append("g")
       .attr("transform", `translate(${margin.left},${margin.top})`);
 
     // Custom node positioning function
     const customNodePositioning = (nodes, links) => {
-      // Group nodes by prefix (A, B, C, D, etc.) and collect all suffixes
+      // Group nodes by prefix (A, B, C, D, etc.)
       const nodesByPrefix = new Map();
       const prefixOrder = [];
-      const allSuffixes = new Set();
       
       nodes.forEach(node => {
         const match = node.name.match(/^([A-Za-z]+)(\d+)?/);
         const prefix = match ? match[1] : node.name.charAt(0);
         const suffix = match && match[2] ? parseInt(match[2]) : 0;
         
-        allSuffixes.add(suffix);
-        
         if (!nodesByPrefix.has(prefix)) {
-          nodesByPrefix.set(prefix, new Map());
+          nodesByPrefix.set(prefix, []);
           prefixOrder.push(prefix);
         }
         
-        nodesByPrefix.get(prefix).set(suffix, {
+        nodesByPrefix.get(prefix).push({
           ...node,
           prefix,
           suffix,
@@ -112,36 +172,40 @@ const SankeyChart = ({ data: propData }) => {
       // Sort prefixes alphabetically
       prefixOrder.sort();
       
-      // Sort suffixes numerically
-      const sortedSuffixes = Array.from(allSuffixes).sort((a, b) => a - b);
+      // Sort nodes within each prefix by suffix
+      nodesByPrefix.forEach(prefixNodes => {
+        prefixNodes.sort((a, b) => a.suffix - b.suffix);
+      });
       
-      // Calculate positions
+      // Calculate positions - responsive node sizing
       const columnWidth = width / prefixOrder.length;
-      const nodeWidth = 8;
-      const rowHeight = (height - 40) / Math.max(sortedSuffixes.length, 1);
+      const nodeWidth = Math.max(6, Math.min(12, width / (prefixOrder.length * 50)));
+      const nodeHeight = Math.max(30, Math.min(60, height / (maxNodesInColumn * 1.5)));
+      const nodePadding = Math.max(10, nodeHeight * 0.25); // Spacing between nodes in same column
       
       const positionedNodes = [];
       
-      // Create a grid layout: columns for prefixes, rows for suffixes
+      // Position each column's nodes compactly
       prefixOrder.forEach((prefix, columnIndex) => {
         const prefixNodes = nodesByPrefix.get(prefix);
         const x = columnIndex * columnWidth + columnWidth / 2 - nodeWidth / 2;
         
-        sortedSuffixes.forEach((suffix, rowIndex) => {
-          if (prefixNodes.has(suffix)) {
-            const node = prefixNodes.get(suffix);
-            const y = 20 + rowIndex * rowHeight;
-            
-            positionedNodes.push({
-              ...node,
-              name: node.originalName,
-              x0: x,
-              x1: x + nodeWidth,
-              y0: y,
-              y1: y + Math.min(rowHeight - 10, 40), // Node height
-              value: 1 // Default value for custom positioning
-            });
-          }
+        // Calculate total height needed for this column
+        const totalNodesHeight = prefixNodes.length * nodeHeight + (prefixNodes.length - 1) * nodePadding;
+        const startY = (height - totalNodesHeight) / 2; // Center vertically
+        
+        prefixNodes.forEach((node, nodeIndex) => {
+          const y = startY + nodeIndex * (nodeHeight + nodePadding);
+          
+          positionedNodes.push({
+            ...node,
+            name: node.originalName,
+            x0: x,
+            x1: x + nodeWidth,
+            y0: y,
+            y1: y + nodeHeight,
+            value: 1 // Default value for custom positioning
+          });
         });
       });
       
@@ -302,7 +366,7 @@ const SankeyChart = ({ data: propData }) => {
       .attr("dy", "0.35em")
       .attr("text-anchor", d => d.x0 < width / 2 ? "end" : "start")
       .text(d => d.name)
-      .style("font-size", "13px")
+      .style("font-size", `${Math.max(11, Math.min(15, containerWidth / 100))}px`)
       .style("font-weight", "600")
       .style("fill", d => {
         if (!selectedKey) return "#333";
@@ -311,15 +375,15 @@ const SankeyChart = ({ data: propData }) => {
       })
       .style("pointer-events", "none");
 
-    // Add legend for keys
+    // Add legend for keys - positioned to the right of the diagram
     const legend = svg.append("g")
       .attr("class", "legend")
-      .attr("transform", `translate(${width + margin.left + 20}, ${margin.top})`);
+      .attr("transform", `translate(${width + margin.left + 30}, ${margin.top})`);
 
     legend.append("text")
       .attr("x", 0)
       .attr("y", -10)
-      .style("font-size", "14px")
+      .style("font-size", `${Math.max(12, Math.min(16, containerWidth / 100))}px`)
       .style("font-weight", "bold")
       .text("Keys (Click to trace)");
 
@@ -344,25 +408,26 @@ const SankeyChart = ({ data: propData }) => {
         .attr("x", 25)
         .attr("y", 9)
         .attr("dy", "0.35em")
-        .style("font-size", "12px")
+        .style("font-size", `${Math.max(11, Math.min(14, containerWidth / 120))}px`)
         .style("font-weight", selectedKey === key ? "bold" : "normal")
         .text(key);
     });
 
-  }, [data, selectedKey, allKeys, keyPaths, keyColorScale]);
+  }, [data, selectedKey, allKeys, keyPaths, keyColorScale, dimensions]);
 
   return (
     <div style={{ 
       position: 'relative', 
       width: '100%', 
-      minHeight: '900px', 
-      padding: '30px',
-      backgroundColor: '#fafafa'
+      minHeight: '100vh', 
+      padding: 'clamp(15px, 3vw, 30px)',
+      backgroundColor: '#fafafa',
+      boxSizing: 'border-box'
     }}>
       <div style={{ 
         marginBottom: '25px',
         backgroundColor: 'white',
-        padding: '20px',
+        padding: 'clamp(15px, 2.5vw, 20px)',
         borderRadius: '8px',
         boxShadow: '0 2px 8px rgba(0,0,0,0.08)'
       }}>
@@ -466,12 +531,20 @@ const SankeyChart = ({ data: propData }) => {
         </div>
       </div>
       
-      <div style={{
-        backgroundColor: 'white',
-        borderRadius: '8px',
-        padding: '20px',
-        boxShadow: '0 2px 8px rgba(0,0,0,0.08)'
-      }}>
+      <div 
+        ref={containerRef}
+        style={{
+          backgroundColor: 'white',
+          borderRadius: '8px',
+          padding: '20px',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+          width: '100%',
+          minHeight: '600px',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          overflow: 'auto'
+        }}>
         <svg ref={svgRef}></svg>
       </div>
       

@@ -20,7 +20,14 @@ The build is minified and the filenames include the hashes.\
 Your app is ready to be deployed!
 
 See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
-
+    const margin = { top: 80, right: 200, bottom: 40, left: 40 };
+    const minWidth = 1400;
+    const minHeight = 800;
+    const widthPerColumn = 350; // Space per column
+    const heightPerNode = 80; // Space per node (including padding)
+line 96
+line 111
+line 350
 ### `npm run eject`
 
 **Note: this is a one-way operation. Once you `eject`, you can't go back!**
